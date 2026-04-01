@@ -101,12 +101,19 @@ def build_full_name(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def select_report_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if "department" not in df.columns:
+        df = df.copy()
+        df["department"] = ""
+
     preferred = [
         "id",
         "full_name",
         "last_name",
         "first_name",
         "middle_name",
+        "dept_code",
+        "department",
+        "position",
         "address",
         "birth_date",
         "system_status",
@@ -161,6 +168,12 @@ def prepare_system_df(system_path: Path) -> pd.DataFrame:
     system["system_status"] = (
         system["system_status"].astype(str).str.strip().str.lower()
     )
+
+    if "department" in system.columns:
+        system["department"] = system["department"].astype(str).fillna("").str.strip()
+    else:
+        system["department"] = ""
+
     return system
 
 
@@ -187,7 +200,7 @@ def prepare_hr_df(hr_path: Path) -> pd.DataFrame:
 
 
 def generate_reports(system: pd.DataFrame, hr: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    system_report = system[["id", "system_status"]].copy()
+    system_report = system[["id", "system_status", "department"]].copy()
     matched_employees = system_report.merge(hr, on="id", how="inner")
 
     inactive_to_update = matched_employees[
