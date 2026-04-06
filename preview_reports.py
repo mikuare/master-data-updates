@@ -7,7 +7,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 
-from compare_employees import REPORT_FILENAMES, process_reports
+from compare_employees import (
+    REPORT_FILENAMES,
+    find_input_file,
+    process_reports,
+    read_excel_file,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -58,15 +63,78 @@ def load_report(filename: str, report_dir: Path) -> pd.DataFrame:
     return df
 
 
+def get_hr_file_path(report_dir: Path) -> Path | None:
+    try:
+        return find_input_file("hr_clean.xlsx", "hr_clean.xls", base_dir=report_dir)
+    except FileNotFoundError:
+        return None
+
+
+def get_hr_branch_label(report_dir: Path) -> str:
+    hr_path = get_hr_file_path(report_dir)
+    if hr_path is None:
+        return ""
+
+    try:
+        preview = read_excel_file(hr_path, header=None, nrows=1).fillna("")
+    except Exception:
+        return ""
+
+    if preview.empty:
+        return ""
+
+    row_values = [str(value).strip() for value in preview.iloc[0].tolist()]
+    non_empty = [value for value in row_values if value and value.lower() != "nan"]
+    if not non_empty:
+        return ""
+
+    return " | ".join(non_empty)
+
+
+def render_column_filter(df: pd.DataFrame, column_name: str, label: str) -> str:
+    if column_name not in df.columns:
+        return ""
+
+    values = (
+        df[column_name]
+        .astype(str)
+        .str.strip()
+        .replace("nan", "")
+    )
+    options = sorted({value for value in values if value})
+    option_tags = ['<option value="">All values</option>']
+    option_tags.append('<option value="__duplicates__">Duplicates only</option>')
+    option_tags.extend(
+        f'<option value="{escape(value)}">{escape(value)}</option>'
+        for value in options
+    )
+
+    return (
+        '<div class="filter-box">'
+        f'<label for="filter-{column_name}">{escape(label)}</label>'
+        f'<select id="filter-{column_name}" data-column="{escape(column_name)}">'
+        f'{"".join(option_tags)}'
+        "</select>"
+        "</div>"
+    )
+
+
 def render_table(df: pd.DataFrame) -> str:
     if df.empty:
         return "<p>No rows found.</p>"
 
-    headers = "".join(f"<th>{escape(str(col))}</th>" for col in df.columns)
+    headers = '<th class="select-col">Mark</th>' + "".join(
+        f"<th>{escape(str(col))}</th>" for col in df.columns
+    )
     rows = []
-    for _, row in df.iterrows():
+    for index, row in df.iterrows():
         cells = "".join(f"<td>{escape(str(value))}</td>" for value in row.tolist())
-        rows.append(f"<tr>{cells}</tr>")
+        checkbox = (
+            '<td class="select-col">'
+            f'<input class="row-check" type="checkbox" aria-label="Highlight row {index + 1}">'
+            "</td>"
+        )
+        rows.append(f"<tr>{checkbox}{cells}</tr>")
     body = "".join(rows)
     return f'<table id="report-table" class="report-table"><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table>'
 
@@ -149,6 +217,7 @@ def render_compare_panel(selected_report: str, message: str = "", error: str = "
     path = latest_report_path(selected_report, report_dir)
     report_name = path.name if path else selected_report
     data_source = report_dir.name if report_dir != BASE_DIR else "project folder"
+    branch_label = get_hr_branch_label(report_dir)
 
     download_links = []
     for filename in REPORT_FILES:
@@ -163,6 +232,8 @@ def render_compare_panel(selected_report: str, message: str = "", error: str = "
 
     message_html = f'<div class="notice success">{escape(message)}</div>' if message else ""
     error_html = f'<div class="notice error">{escape(error)}</div>' if error else ""
+    department_filter = render_column_filter(df, "department", "Department")
+    position_filter = render_column_filter(df, "position", "Position")
 
     return f"""
       <section class="hero">
@@ -207,6 +278,7 @@ def render_compare_panel(selected_report: str, message: str = "", error: str = "
         <div class="panel-title-row">
           <div>
             <div class="panel-kicker">Results</div>
+            {f'<div class="branch-chip">Branch: {escape(branch_label)}</div>' if branch_label else ''}
             <h2>{escape(report_name)}</h2>
           </div>
         </div>
@@ -216,6 +288,8 @@ def render_compare_panel(selected_report: str, message: str = "", error: str = "
           <div class="search-box">
             <input id="report-search" type="search" placeholder="Search employee ID, name, address, or status">
           </div>
+          {department_filter}
+          {position_filter}
           <div id="search-meta" class="search-meta">Showing all rows</div>
         </div>
         <div class="summary">{render_summary(df)}</div>
@@ -484,6 +558,17 @@ def render_page(
       font-size: 13px;
       color: var(--muted);
     }}
+    .branch-chip {{
+      display: inline-flex;
+      align-items: center;
+      margin-bottom: 10px;
+      background: rgba(15, 118, 110, 0.08);
+      border: 1px solid rgba(15, 118, 110, 0.18);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: var(--accent);
+    }}
     .upload-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -535,7 +620,7 @@ def render_page(
       min-width: 260px;
       flex: 1 1 320px;
     }}
-    .search-box input {{
+    .search-box input, .filter-box select {{
       width: 100%;
       border: 1px solid var(--line);
       background: #fffdf8;
@@ -543,6 +628,10 @@ def render_page(
       padding: 11px 14px;
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
       font-size: 14px;
+    }}
+    .filter-box {{
+      min-width: 180px;
+      flex: 0 1 220px;
     }}
     .search-meta {{
       color: var(--muted);
@@ -626,6 +715,9 @@ def render_page(
       vertical-align: top;
       white-space: nowrap;
     }}
+    .report-table tbody tr.row-selected {{
+      background: #fff4cf;
+    }}
     .report-table th {{
       position: sticky;
       top: 0;
@@ -633,7 +725,21 @@ def render_page(
       font-weight: 600;
       letter-spacing: 0.01em;
     }}
+    .select-col {{
+      width: 72px;
+      min-width: 72px;
+      text-align: center;
+    }}
+    .row-check {{
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }}
     .report-table td:first-child, .report-table th:first-child {{
+      font-family: inherit;
+    }}
+    .report-table td:nth-child(2), .report-table th:nth-child(2) {{
       font-family: "Consolas", "Courier New", monospace;
     }}
     p {{
@@ -724,26 +830,105 @@ def render_page(
       return;
     }}
 
+    const filterInputs = Array.from(document.querySelectorAll("[data-column]"));
+    const headers = Array.from(table.querySelectorAll("thead th")).map((cell) =>
+      cell.textContent.trim().toLowerCase()
+    );
     const rows = Array.from(table.querySelectorAll("tbody tr"));
+    const duplicateMaps = new Map();
+
+    filterInputs.forEach((filter) => {{
+      const columnName = (filter.dataset.column || "").trim().toLowerCase();
+      const columnIndex = headers.indexOf(columnName);
+      if (columnIndex === -1) {{
+        return;
+      }}
+
+      const counts = new Map();
+      rows.forEach((row) => {{
+        const cells = row.querySelectorAll("td");
+        const value = (cells[columnIndex]?.textContent || "").trim();
+        if (!value) {{
+          return;
+        }}
+        counts.set(value, (counts.get(value) || 0) + 1);
+      }});
+      duplicateMaps.set(columnName, counts);
+    }});
+
     const update = () => {{
       const query = input.value.trim().toLowerCase();
       let visible = 0;
 
       rows.forEach((row) => {{
         const text = row.textContent.toLowerCase();
-        const match = !query || text.includes(query);
+        const cells = Array.from(row.querySelectorAll("td"));
+        const queryMatch = !query || text.includes(query);
+
+        const filterMatch = filterInputs.every((filter) => {{
+          const columnName = (filter.dataset.column || "").trim().toLowerCase();
+          const columnIndex = headers.indexOf(columnName);
+          if (columnIndex === -1) {{
+            return true;
+          }}
+
+          const selected = filter.value;
+          if (!selected) {{
+            return true;
+          }}
+
+          const cellValue = (cells[columnIndex]?.textContent || "").trim();
+          if (selected === "__duplicates__") {{
+            const counts = duplicateMaps.get(columnName);
+            return Boolean(cellValue) && (counts?.get(cellValue) || 0) > 1;
+          }}
+
+          return cellValue === selected;
+        }});
+
+        const match = queryMatch && filterMatch;
         row.style.display = match ? "" : "none";
         if (match) {{
           visible += 1;
         }}
       }});
 
-      meta.textContent = query
-        ? "Showing " + visible + " matching row(s)"
-        : "Showing all " + rows.length + " row(s)";
+      const activeFilters = filterInputs
+        .map((filter) => {{
+          if (!filter.value) {{
+            return "";
+          }}
+          const label = filter.id.replace("filter-", "").replace(/-/g, " ");
+          return filter.value === "__duplicates__"
+            ? label + ": duplicates"
+            : label + ": " + filter.value;
+        }})
+        .filter(Boolean);
+
+      const parts = [];
+      parts.push("Showing " + visible + " of " + rows.length + " row(s)");
+      if (query) {{
+        parts.push('search: "' + input.value.trim() + '"');
+      }}
+      if (activeFilters.length) {{
+        parts.push(activeFilters.join(" | "));
+      }}
+      meta.textContent = parts.join(" | ");
     }};
 
     input.addEventListener("input", update);
+    filterInputs.forEach((filter) => {{
+      filter.addEventListener("change", update);
+    }});
+    rows.forEach((row) => {{
+      const checkbox = row.querySelector(".row-check");
+      if (!checkbox) {{
+        return;
+      }}
+      checkbox.addEventListener("change", () => {{
+        row.classList.toggle("row-selected", checkbox.checked);
+      }});
+    }});
     update();
   }})();
 </script>
