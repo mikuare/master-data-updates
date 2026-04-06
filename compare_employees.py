@@ -207,6 +207,7 @@ def generate_reports(system: pd.DataFrame, hr: pd.DataFrame) -> dict[str, pd.Dat
         (matched_employees["system_status"] == "active") &
         (matched_employees["hr_status"] != "active")
     ].copy()
+    inactive_to_update["hr_status"] = "inactive"
 
     active_to_update = matched_employees[
         (matched_employees["system_status"] != "active") &
