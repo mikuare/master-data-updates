@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default
 from html import escape
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from urllib.parse import parse_qs, quote, urlparse
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -98,7 +100,25 @@ REPORT_LABELS = {
     "inactive_to_update.xlsx": "Inactive To Update",
     "active_to_update.xlsx": "Active To Update",
     "new_active_employees.xlsx": "New Active Employees",
+    "new_in_system_since_last_month.xlsx": "New In System Since Last Snapshot",
 }
+APP_TIMEZONE = ZoneInfo("Asia/Manila")
+
+
+def local_now() -> datetime:
+    return datetime.now(APP_TIMEZONE)
+
+
+def format_local_timestamp(value: float | datetime, pattern: str = "%B %d, %Y %I:%M %p") -> str:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromtimestamp(value, APP_TIMEZONE)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=APP_TIMEZONE)
+    else:
+        dt = dt.astimezone(APP_TIMEZONE)
+    return dt.strftime(pattern)
 
 
 def get_active_report_dir() -> Path:
@@ -126,7 +146,7 @@ def list_saved_report_runs() -> list[dict[str, str]]:
         reverse=True,
     ):
         branch = get_hr_branch_label(path) or "Unknown branch"
-        timestamp = pd.Timestamp(path.stat().st_mtime, unit="s").strftime("%B %d, %Y %I:%M %p")
+        timestamp = format_local_timestamp(path.stat().st_mtime)
         runs.append(
             {
                 "name": path.name,
@@ -193,7 +213,7 @@ def save_print_status_breakdown(rows: list[dict[str, object]]) -> None:
 
 def save_current_print_report_archive() -> Path:
     PRINT_REPORT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = format_local_timestamp(local_now(), "%Y%m%d_%H%M%S")
     target = PRINT_REPORT_ARCHIVE_DIR / f"employee_update_print_report_{timestamp}.pdf"
     target.write_bytes(export_print_report_pdf())
     return target
@@ -209,7 +229,7 @@ def default_print_preset() -> dict[str, str]:
         "date_value": "",
         "section1_title": "Employee Update Totals",
         "section2_title": "Updated System Employee Status Totals",
-        "section1_note": "Section 1 shows the employee update counts added from the comparison reports for each branch.",
+        "section1_note": "Section 1 shows the employee update counts added from the comparison reports for each branch, including employee IDs newly added in the system since the last saved branch snapshot.",
         "section2_note": "Section 2 shows branch-based active, inactive, and overall employee totals from the uploaded updated system_clean file using the defined branch mapping.",
         "header_bg": "#e5f3f1",
         "status_header_bg": "#e8eefc",
@@ -410,6 +430,7 @@ def build_print_report_summary() -> dict[str, object]:
     grand_inactive = 0
     grand_active = 0
     grand_new = 0
+    grand_new_in_system = 0
     grand_total = 0
     grand_total_inactive_employees = 0
     grand_total_active_employees = 0
@@ -419,10 +440,12 @@ def build_print_report_summary() -> dict[str, object]:
         inactive = int(item.get("inactive_to_update", 0))
         active = int(item.get("active_to_update", 0))
         new_active = int(item.get("new_active_employees", 0))
-        total = int(item.get("total", inactive + active + new_active))
+        new_in_system = int(item.get("new_in_system_since_last_month", 0))
+        total = int(item.get("total", inactive + active + new_active + new_in_system))
         grand_inactive += inactive
         grand_active += active
         grand_new += new_active
+        grand_new_in_system += new_in_system
         grand_total += total
         update_rows.append(
             {
@@ -430,6 +453,7 @@ def build_print_report_summary() -> dict[str, object]:
                 "Inactive To Update": inactive,
                 "Active To Update": active,
                 "New Active Employees": new_active,
+                "New In System Since Last Snapshot": new_in_system,
                 "Grand Total": total,
             }
         )
@@ -458,6 +482,7 @@ def build_print_report_summary() -> dict[str, object]:
             "Inactive To Update": grand_inactive,
             "Active To Update": grand_active,
             "New Active Employees": grand_new,
+            "New In System Since Last Snapshot": grand_new_in_system,
             "Grand Total": grand_total,
         },
         "status_total": {
@@ -477,7 +502,7 @@ def export_print_report_workbook() -> bytes:
 
     preset = get_active_print_preset()
     summary = build_print_report_summary()
-    rendered_date_value = preset["date_value"] or pd.Timestamp.now().strftime("%B %d, %Y %I:%M %p")
+    rendered_date_value = preset["date_value"] or format_local_timestamp(local_now())
     logo_path = get_print_logo_path()
 
     wb = Workbook()
@@ -571,7 +596,7 @@ def export_print_report_workbook() -> bytes:
         footer=0.2,
     )
 
-    for col, width in {"A": 16, "B": 21, "C": 16, "D": 16, "E": 18}.items():
+    for col, width in {"A": 16, "B": 18, "C": 16, "D": 16, "E": 18, "F": 16}.items():
         ws.column_dimensions[col].width = width
 
     ws.row_dimensions[1].height = 25
@@ -616,17 +641,17 @@ def export_print_report_workbook() -> bytes:
         )
 
     merge_and_style(6, 1, 6, 2, preset["date_label"], border_style=outer_border, alignment_style=center, font_style=Font(size=11, bold=True))
-    merge_and_style(6, 3, 6, 5, rendered_date_value, border_style=outer_border, alignment_style=center, font_style=Font(size=11, bold=True))
+    merge_and_style(6, 3, 6, 6, rendered_date_value, border_style=outer_border, alignment_style=center, font_style=Font(size=11, bold=True))
 
     start_row = 8
     ws.row_dimensions[start_row].height = 20
-    merge_and_style(start_row, 1, start_row, 5, preset["section1_title"], border_style=border, alignment_style=left, font_style=Font(size=10, bold=True))
+    merge_and_style(start_row, 1, start_row, 6, preset["section1_title"], border_style=border, alignment_style=left, font_style=Font(size=10, bold=True))
     note_row = start_row + 1
     ws.row_dimensions[note_row].height = 34
-    merge_and_style(note_row, 1, note_row, 5, preset["section1_note"], border_style=border, alignment_style=left, font_style=Font(size=9))
+    merge_and_style(note_row, 1, note_row, 6, preset["section1_note"], border_style=border, alignment_style=left, font_style=Font(size=9))
     table_start = start_row + 2
     ws.row_dimensions[table_start].height = 24
-    update_headers = ["Branch", "Inactive To Update", "Active To Update", "New Active Employees", "Grand Total"]
+    update_headers = ["Branch", "Inactive To Update", "Active To Update", "New Active Employees", "New In System", "Grand Total"]
     for index, header in enumerate(update_headers, start=1):
         cell = ws.cell(row=table_start, column=index, value=header)
         cell.fill = header_fill
@@ -637,7 +662,7 @@ def export_print_report_workbook() -> bytes:
     current_row = table_start + 1
     update_rows = list(summary["updates"])
     if not update_rows:
-        merge_and_style(current_row, 1, current_row, 5, "No branches added yet.", border_style=border, alignment_style=center)
+        merge_and_style(current_row, 1, current_row, 6, "No branches added yet.", border_style=border, alignment_style=center)
         current_row += 1
     else:
         for row in update_rows:
@@ -647,6 +672,7 @@ def export_print_report_workbook() -> bytes:
                 row["Inactive To Update"],
                 row["Active To Update"],
                 row["New Active Employees"],
+                row["New In System Since Last Snapshot"],
                 row["Grand Total"],
             ]
             for index, value in enumerate(values, start=1):
@@ -664,6 +690,7 @@ def export_print_report_workbook() -> bytes:
             totals["Inactive To Update"],
             totals["Active To Update"],
             totals["New Active Employees"],
+            totals["New In System Since Last Snapshot"],
             totals["Grand Total"],
         ],
         start=1,
@@ -677,10 +704,10 @@ def export_print_report_workbook() -> bytes:
     current_row += 2
 
     ws.row_dimensions[current_row].height = 20
-    merge_and_style(current_row, 1, current_row, 5, preset["section2_title"], border_style=border, alignment_style=left, font_style=Font(size=10, bold=True))
+    merge_and_style(current_row, 1, current_row, 6, preset["section2_title"], border_style=border, alignment_style=left, font_style=Font(size=10, bold=True))
     note_row = current_row + 1
     ws.row_dimensions[note_row].height = 34
-    merge_and_style(note_row, 1, note_row, 5, preset["section2_note"], border_style=border, alignment_style=left, font_style=Font(size=9))
+    merge_and_style(note_row, 1, note_row, 6, preset["section2_note"], border_style=border, alignment_style=left, font_style=Font(size=9))
     current_row += 2
 
     status_headers = ["Branch", "Total Inactive Employees", "Total Active Employees", "Total Employees Overall"]
@@ -696,7 +723,7 @@ def export_print_report_workbook() -> bytes:
     current_row += 1
     status_rows = list(summary["status"])
     if not status_rows:
-        merge_and_style(current_row, 1, current_row, 5, "No updated system totals added yet.", border_style=border, alignment_style=center)
+        merge_and_style(current_row, 1, current_row, 6, "No updated system totals added yet.", border_style=border, alignment_style=center)
         current_row += 1
     else:
         for row in status_rows:
@@ -756,7 +783,7 @@ def export_print_report_workbook() -> bytes:
     ws.row_dimensions[title_row].height = 18
 
     ws.print_title_rows = "1:6"
-    ws.print_area = "A1:E{}".format(title_row)
+    ws.print_area = "A1:F{}".format(title_row)
 
     output = BytesIO()
     wb.save(output)
@@ -902,6 +929,7 @@ def add_current_report_to_print_queue(report_dir: Path) -> dict[str, object]:
         "inactive_to_update": int(summary["counts"].get("inactive_to_update.xlsx", 0)),
         "active_to_update": int(summary["counts"].get("active_to_update.xlsx", 0)),
         "new_active_employees": int(summary["counts"].get("new_active_employees.xlsx", 0)),
+        "new_in_system_since_last_month": int(summary["counts"].get("new_in_system_since_last_month.xlsx", 0)),
         "total_inactive_employees": 0,
         "total_active_employees": 0,
         "total_employees_overall": 0,
@@ -1182,6 +1210,7 @@ def upsert_filtered_report_to_print_queue(
         "inactive_to_update.xlsx": "inactive_to_update",
         "active_to_update.xlsx": "active_to_update",
         "new_active_employees.xlsx": "new_active_employees",
+        "new_in_system_since_last_month.xlsx": "new_in_system_since_last_month",
     }
     target_field = filename_to_field.get(report_name)
     if target_field is None:
@@ -1200,6 +1229,7 @@ def upsert_filtered_report_to_print_queue(
         "inactive_to_update": 0,
         "active_to_update": 0,
         "new_active_employees": 0,
+        "new_in_system_since_last_month": 0,
         "total": 0,
         "generated_at": str(summary["generated_at"]),
         "source_name": source_name,
@@ -1214,7 +1244,12 @@ def upsert_filtered_report_to_print_queue(
     entry["source_name"] = source_name
     entry["system_file"] = str(summary["system_file"])
     entry["hr_file"] = str(summary["hr_file"])
-    entry["total"] = int(entry["inactive_to_update"]) + int(entry["active_to_update"]) + int(entry["new_active_employees"])
+    entry["total"] = (
+        int(entry["inactive_to_update"])
+        + int(entry["active_to_update"])
+        + int(entry["new_active_employees"])
+        + int(entry["new_in_system_since_last_month"])
+    )
 
     remaining_queue.append(entry)
     save_print_report_queue(remaining_queue)
@@ -1322,7 +1357,7 @@ def summarize_reports(report_dir: Path, include_reports: set[str] | None = None)
     included = normalize_include_reports(include_reports)
     summary: dict[str, object] = {
         "branch": get_hr_branch_label(report_dir),
-        "generated_at": pd.Timestamp.now().strftime("%B %d, %Y %I:%M %p"),
+        "generated_at": format_local_timestamp(local_now()),
         "source_name": report_dir.name if report_dir != BASE_DIR else "project folder",
         "system_file": "",
         "hr_file": "",
@@ -1673,6 +1708,46 @@ def render_compare_panel(
             f"{updated_system_summary['branch_column']} "
             f"(Column {updated_system_summary['branch_column_letter']}, {updated_system_summary['branch_column_source']})"
         )
+    workflow_guide = """
+      <section class="panel workflow-panel">
+        <div class="panel-title-row">
+          <div>
+            <div class="panel-kicker">Instructions</div>
+            <h2>Monthly Workflow Guide</h2>
+          </div>
+        </div>
+        <details class="workflow-details">
+          <summary>Show step-by-step workflow</summary>
+          <div class="workflow-content">
+            <p><strong>Use this monthly order for each branch run.</strong></p>
+            <ol>
+              <li>Upload the branch <code>system_clean</code> and <code>hr_clean</code> in <strong>Run Comparison</strong>.</li>
+              <li>Review the generated reports:
+                <code>inactive_to_update</code>,
+                <code>active_to_update</code>,
+                <code>new_active_employees</code>,
+                and <code>new_in_system_since_last_month</code>.
+              </li>
+              <li>Use <strong>Add To Print Report</strong> to send the branch counts into Section 1 of the printable form.</li>
+              <li>Upload the branch <code>updated_system_clean</code> in <strong>Updated System Status</strong>.</li>
+              <li>Review the active, inactive, and overall branch totals.</li>
+              <li>Click <strong>Add Status Totals To Print Report</strong> to send those totals into Section 2 of the printable form.</li>
+              <li>Repeat the same steps for the next branch.</li>
+              <li>When all branches are complete, open the printable form, review it, then save/archive the final monthly report.</li>
+              <li>After saving the final printable report, the live printable form can be reset for the next monthly cycle.</li>
+            </ol>
+            <p><strong>Important notes</strong></p>
+            <ul>
+              <li><code>new_in_system_since_last_month</code> follows the current run branch from the uploaded <code>hr_clean</code> context.</li>
+              <li>That report uses <code>system_clean</code> only for the newly detected system employees.</li>
+              <li>The first three reports use name details from <code>hr_clean</code>.</li>
+              <li>The <strong>Updated System Status</strong> section is only for active, inactive, and overall totals. New employee ID detection stays in the main compare flow.</li>
+              <li>If no previous snapshot exists for the branch yet, new-in-system counting is skipped for that run until the branch has a saved prior month baseline.</li>
+            </ul>
+          </div>
+        </details>
+      </section>
+    """
 
     return f"""
       <section class="hero">
@@ -1685,6 +1760,7 @@ def render_compare_panel(
           <span>Download Ready</span>
         </div>
       </section>
+      {workflow_guide}
       <section class="panel upload-panel">
         <div class="panel-title-row">
           <div>
@@ -1899,6 +1975,7 @@ def render_print_report(
     grand_inactive = 0
     grand_active = 0
     grand_new = 0
+    grand_new_in_system = 0
     grand_total = 0
     grand_total_inactive_employees = 0
     grand_total_active_employees = 0
@@ -1909,10 +1986,12 @@ def render_print_report(
         inactive = int(item.get("inactive_to_update", 0))
         active = int(item.get("active_to_update", 0))
         new_active = int(item.get("new_active_employees", 0))
-        total = int(item.get("total", inactive + active + new_active))
+        new_in_system = int(item.get("new_in_system_since_last_month", 0))
+        total = int(item.get("total", inactive + active + new_active + new_in_system))
         grand_inactive += inactive
         grand_active += active
         grand_new += new_active
+        grand_new_in_system += new_in_system
         grand_total += total
         rows.append(
             "<tr>"
@@ -1920,6 +1999,7 @@ def render_print_report(
             f"<td class=\"count\">{inactive}</td>"
             f"<td class=\"count\">{active}</td>"
             f"<td class=\"count\">{new_active}</td>"
+            f"<td class=\"count\">{new_in_system}</td>"
             f"<td class=\"count\">{total}</td>"
             "<td class=\"screen-only row-action-cell\">"
             "<form method=\"post\" enctype=\"multipart/form-data\">"
@@ -1949,14 +2029,14 @@ def render_print_report(
 
     if not rows:
         rows.append(
-            '<tr><td colspan="6" class="empty-state">No branches added yet.</td></tr>'
+            '<tr><td colspan="7" class="empty-state">No branches added yet.</td></tr>'
         )
     if not status_rows:
         status_rows.append(
             '<tr><td colspan="4" class="empty-state">No updated system totals added yet.</td></tr>'
         )
 
-    rendered_date_value = preset["date_value"] or pd.Timestamp.now().strftime("%B %d, %Y %I:%M %p")
+    rendered_date_value = preset["date_value"] or format_local_timestamp(local_now())
 
     return f"""<!doctype html>
 <html lang="en">
@@ -2136,7 +2216,7 @@ def render_print_report(
       background: var(--status-header-bg);
     }}
     .count {{
-      width: 18%;
+      width: 14%;
       text-align: center;
       font-weight: 700;
     }}
@@ -2349,6 +2429,7 @@ def render_print_report(
               <th class="count">Inactive To Update</th>
               <th class="count">Active To Update</th>
               <th class="count">New Active Employees</th>
+              <th class="count">New In System</th>
               <th class="count">Grand Total</th>
               <th class="screen-only">Action</th>
             </tr>
@@ -2360,6 +2441,7 @@ def render_print_report(
               <td class="count">{grand_inactive}</td>
               <td class="count">{grand_active}</td>
               <td class="count">{grand_new}</td>
+              <td class="count">{grand_new_in_system}</td>
               <td class="count">{grand_total}</td>
             </tr>
           </tbody>
@@ -2764,6 +2846,37 @@ def render_page(
       border-radius: 999px;
       padding: 8px 12px;
       font-size: 13px;
+    }}
+    .workflow-details {{
+      border: 1px solid rgba(216, 202, 185, 0.95);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.7);
+      overflow: hidden;
+    }}
+    .workflow-details summary {{
+      cursor: pointer;
+      padding: 14px 16px;
+      font-weight: 700;
+      list-style: none;
+    }}
+    .workflow-details summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .workflow-content {{
+      padding: 0 16px 16px;
+      color: var(--ink);
+      line-height: 1.6;
+    }}
+    .workflow-content p {{
+      margin: 0 0 10px;
+    }}
+    .workflow-content ol,
+    .workflow-content ul {{
+      margin: 0 0 12px 20px;
+      padding: 0;
+    }}
+    .workflow-content li {{
+      margin-bottom: 8px;
     }}
     .panel-title-row {{
       display: flex;
@@ -3427,7 +3540,8 @@ class ReportHandler(BaseHTTPRequestHandler):
                 f"Saved branch {entry['branch']} to the printable report. "
                 f"Inactive: {entry['inactive_to_update']}, "
                 f"Active: {entry['active_to_update']}, "
-                f"New active: {entry['new_active_employees']}."
+                f"New active: {entry['new_active_employees']}, "
+                f"New in system: {entry['new_in_system_since_last_month']}."
             )
             target = (
                 f"/?tab=compare-employees&report={quote(report_name)}"
@@ -3639,11 +3753,12 @@ class ReportHandler(BaseHTTPRequestHandler):
                 if report_name not in REPORT_FILES:
                     report_name = REPORT_FILES[0]
                 message = (
-                    f"Saved branch {entry['branch']} to the printable report. "
-                    f"Inactive: {entry['inactive_to_update']}, "
-                    f"Active: {entry['active_to_update']}, "
-                    f"New active: {entry['new_active_employees']}."
-                )
+                f"Saved branch {entry['branch']} to the printable report. "
+                f"Inactive: {entry['inactive_to_update']}, "
+                f"Active: {entry['active_to_update']}, "
+                f"New active: {entry['new_active_employees']}, "
+                f"New in system: {entry['new_in_system_since_last_month']}."
+            )
                 target = (
                     f"/?tab=compare-employees&report={quote(report_name)}"
                     f"&message={quote(message)}"
@@ -3703,7 +3818,7 @@ class ReportHandler(BaseHTTPRequestHandler):
             if "system_file" not in files or "hr_file" not in files:
                 raise ValueError("Upload both the system file and the HR file.")
 
-            run_dir = UPLOAD_DIR / f"run_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}"
+            run_dir = UPLOAD_DIR / f"run_{format_local_timestamp(local_now(), '%Y%m%d_%H%M%S')}"
             run_dir.mkdir(parents=True, exist_ok=True)
 
             system_path = save_uploaded_file("system_clean", files["system_file"], run_dir)
@@ -3713,10 +3828,15 @@ class ReportHandler(BaseHTTPRequestHandler):
 
             message = (
                 f"Compared {result['system_file']} and {result['hr_file']}. "
+                f"Run branch: {result['run_branch_key']}. "
                 f"Matched: {result['matched_count']}, "
                 f"Inactive updates: {result['inactive_count']}, "
                 f"Active updates: {result['active_count']}, "
-                f"New active: {result['new_active_count']}."
+                f"New active: {result['new_active_count']}, "
+                f"New in system: {result['new_in_system_count']} "
+                f"(active {result['new_in_system_active_count']}, inactive {result['new_in_system_inactive_count']}). "
+                f"{'Used previous snapshot ' + result['new_in_system_previous_snapshot_name'] + '.' if result['new_in_system_previous_snapshot_found'] else 'No previous snapshot was found for this run branch, so new-in-system counting was skipped.'}"
+                f"{(' Missing previous snapshot for: ' + ', '.join(result['new_in_system_missing_snapshot_branches']) + '.') if result['new_in_system_missing_snapshot_branches'] else ''}"
             )
             page = render_page(active_tab, selected_report, message=message).encode("utf-8")
         except Exception as exc:

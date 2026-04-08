@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+.last_preview_run.txt
+.print_report_queue.json
+.print_status_breakdown.json
+
+branch_history/
+web_uploads/
+employee update print report/
